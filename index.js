@@ -1,9 +1,6 @@
 const { S3Client, GetObjectCommand, PutObjectCommand } = require('@aws-sdk/client-s3');
 const sharp = require('sharp');
 
-// Later change this to the env variable
-const IMAGES_BUCKET = 'my-cool-local-bucket';
-
 exports.handler = async (event, context) => {
     try {
         // Read data from event object
@@ -11,6 +8,13 @@ exports.handler = async (event, context) => {
         const sourceBucket = event.Records[0].s3.bucket.name;
         const sourceKey = event.Records[0].s3.object.key;
         const resizedImageHeight = 100;
+
+        // Instantiate a new S3 client
+        const s3Client = new S3Client({
+            region: region,
+            endpoint: 'http://localhost:4566',
+            forcePathStyle: true
+        });
 
         if (!sourceKey) {
             console.error(`Error: Source key is not defined.`);
@@ -23,7 +27,7 @@ exports.handler = async (event, context) => {
             };
         }
 
-        if (sourceKey.startsWith('_resized')) {
+        if (sourceKey.includes('_resized')) {
             console.log(`Skipping processing for already resized image: ${sourceKey}`);
             return {
                 statusCode: 200,
@@ -34,21 +38,7 @@ exports.handler = async (event, context) => {
             };
         }
 
-        // Instantiate a new S3 client
-        const s3Client = new S3Client({
-            region: region,
-            endpoint: 'http://localhost:4566',
-            forcePathStyle: true
-        });
-
-        // Create an object with parameters for GetObjectCommand
-        const getObjectParams = {
-            Bucket: sourceBucket,
-            Key: sourceKey
-        };
-
-        // Get object/image from bucket and return the result
-        const downloadedImage = await s3Client.send(new GetObjectCommand(getObjectParams));
+        const downloadedImage = await downloadImage(s3Client, sourceBucket, sourceKey);
 
         const originalMetadata = await sharp(downloadedImage.Body).metadata();
 
@@ -67,27 +57,19 @@ exports.handler = async (event, context) => {
         // Resize the image
         const resizedImage = await sharp(downloadedImage.Body)
             .resize({ height: resizedImageHeight })
+            // Makes sure Content-Type stays the same 
             .toBuffer();
 
-        // Create an object with parameters for PutObjectCommand
-        const newKey = sourceKey.replace(/(\.[\w\d_-]+)$/i, '_resized$1');
-
-        const uploadObjectParams = {
-            Bucket: IMAGES_BUCKET,
-            Key: newKey,
-            Body: resizedImage
-        };
-
-        // Upload resized object to the bucket
-        await s3Client.send(new PutObjectCommand(uploadObjectParams));
+        await uploadImage(s3Client, sourceBucket, sourceKey, resizedImage);
 
         return {
             statusCode: 200,
-            body: JSON.stringify({ message: `Image ${newKey} resized and uploaded successfully` }),
+            body: JSON.stringify({ message: `Image resized and uploaded successfully` }),
             headers: {
                 'Content-Type': 'application/json'
             }
         };
+
 
     } catch (error) {
         console.error('Error resizing image:', error);
@@ -97,3 +79,28 @@ exports.handler = async (event, context) => {
         };
     }
 };
+async function downloadImage(s3Client, sourceBucket, sourceKey) {
+    // Create an object with parameters for GetObjectCommand
+    const getObjectParams = {
+        Bucket: sourceBucket,
+        Key: sourceKey
+    };
+
+    // Get object/image from bucket and return the result
+    const downloadedImage = await s3Client.send(new GetObjectCommand(getObjectParams));
+    return downloadedImage;
+}
+
+async function uploadImage(s3Client, sourceBucket, sourceKey, resizedImage) {
+    // Create an object with parameters for PutObjectCommand
+    const newKey = sourceKey.replace(/(\.[\w\d_-]+)$/i, '_resized$1');
+
+    const uploadObjectParams = {
+        Bucket: sourceBucket,
+        Key: newKey,
+        Body: resizedImage
+    };
+
+    // Upload resized object to the bucket
+    await s3Client.send(new PutObjectCommand(uploadObjectParams));
+}
