@@ -7,13 +7,11 @@ exports.handler = async (event, context) => {
         const region = event.Records[0].awsRegion;
         const sourceBucket = event.Records[0].s3.bucket.name;
         const sourceKey = event.Records[0].s3.object.key;
-        const resizedImageHeight = 100;
+        const resizedImageHeight = 200;
 
         // Instantiate a new S3 client
         const s3Client = new S3Client({
-            region: region,
-            endpoint: 'http://localhost:4566',
-            forcePathStyle: true
+            region: region
         });
 
         if (!sourceKey) {
@@ -40,7 +38,11 @@ exports.handler = async (event, context) => {
 
         const downloadedImage = await downloadImage(s3Client, sourceBucket, sourceKey);
 
-        const originalMetadata = await sharp(downloadedImage.Body).metadata();
+        const imageBuffer = await covertStreamToBuffer(downloadedImage.Body);
+
+        // {ContentType}= downloadedImage.Body -> resultet in time out, body too big for this kind of search 
+        const contentType = downloadedImage.ContentType;
+        const originalMetadata = await sharp(imageBuffer).metadata()
 
         // Check if image is too small to be resized
         if (originalMetadata.height < resizedImageHeight) {
@@ -55,21 +57,12 @@ exports.handler = async (event, context) => {
         }
 
         // Resize the image
-        const resizedImage = await sharp(downloadedImage.Body)
+        const resizedImage = await sharp(imageBuffer)
             .resize({ height: resizedImageHeight })
             // Makes sure Content-Type stays the same 
             .toBuffer();
 
-        await uploadImage(s3Client, sourceBucket, sourceKey, resizedImage);
-
-        return {
-            statusCode: 200,
-            body: JSON.stringify({ message: `Image resized and uploaded successfully` }),
-            headers: {
-                'Content-Type': 'application/json'
-            }
-        };
-
+        await uploadImage(s3Client, sourceBucket, sourceKey, resizedImage, contentType);
 
     } catch (error) {
         console.error('Error resizing image:', error);
@@ -79,6 +72,7 @@ exports.handler = async (event, context) => {
         };
     }
 };
+
 async function downloadImage(s3Client, sourceBucket, sourceKey) {
     // Create an object with parameters for GetObjectCommand
     const getObjectParams = {
@@ -91,16 +85,37 @@ async function downloadImage(s3Client, sourceBucket, sourceKey) {
     return downloadedImage;
 }
 
-async function uploadImage(s3Client, sourceBucket, sourceKey, resizedImage) {
-    // Create an object with parameters for PutObjectCommand
-    const newKey = sourceKey.replace(/(\.[\w\d_-]+)$/i, '_resized$1');
+async function uploadImage(s3Client, sourceBucket, sourceKey, resizedImage, contentType) {
+    // Otherwise in the folder resized-images the folder original-images will be created again
+    const baseKey = sourceKey.replace('original-images/', '');
+    const newKey = `resized-images/${baseKey.replace(/(\.[\w\d_-]+)$/i, '_resized$1')}`;
 
     const uploadObjectParams = {
         Bucket: sourceBucket,
         Key: newKey,
-        Body: resizedImage
+        Body: resizedImage,
+        ContentType: contentType
     };
 
     // Upload resized object to the bucket
     await s3Client.send(new PutObjectCommand(uploadObjectParams));
+    // the logs in CloudWatch only show console.log statements but not the return statemenst
+    console.log(`Uploading image succeeded, ${newKey}`);
+    return {
+        statusCode: 200,
+        body: JSON.stringify({ message: `Image ${newKey} resized and uploaded successfully` }),
+        headers: {
+            'Content-Type': 'application/json'
+        }
+    };
 }
+
+// Stream from downloaded image has to be converted to buffer so that sharp can use it
+const covertStreamToBuffer = async (stream) => {
+    return new Promise((resolve, reject) => {
+        const chunks = [];
+        stream.on('data', (chunk) => chunks.push(chunk));
+        stream.on('end', () => resolve(Buffer.concat(chunks)));
+        stream.on('error', reject);
+    });
+};
