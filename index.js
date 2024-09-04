@@ -2,61 +2,47 @@ const { S3Client, GetObjectCommand, PutObjectCommand } = require('@aws-sdk/clien
 const sharp = require('sharp');
 
 exports.handler = async (event, context) => {
+
+    // Read data from event object
+    const region = event.Records[0].awsRegion;
+    const sourceBucket = event.Records[0].s3.bucket.name;
+    const sourceKey = event.Records[0].s3.object.key;
+    const resizedImageHeight = 200;
+
+    // Instantiate a new S3 client
+    const s3Client = new S3Client({
+        region: region
+    });
+
+    // Early exit if the file is an .avif to prevent sharp from processing it
+    if (!sourceKey || sourceKey.includes('resized__') || sourceKey.endsWith('.avif')) {
+        console.log(`Skipping unsupported or already processed image: ${sourceKey}`);
+        return { statusCode: 200, body: JSON.stringify({ message: 'No action required.' }) };
+    }
     try {
-        // Read data from event object
-        const region = event.Records[0].awsRegion;
-        const sourceBucket = event.Records[0].s3.bucket.name;
-        const sourceKey = event.Records[0].s3.object.key;
-        const resizedImageHeight = 200;
-
-        // Instantiate a new S3 client
-        const s3Client = new S3Client({
-            region: region
-        });
-
-        if (!sourceKey) {
-            console.error(`Error: Source key is not defined.`);
-            return {
-                statusCode: 400,
-                body: JSON.stringify({ error: 'Failed to process the image due to undefined source key.' }),
-                headers: {
-                    'Content-Type': 'application/json'
-                }
-            };
-        }
-
-        if (sourceKey.includes('_resized')) {
-            console.log(`Skipping processing for already resized image: ${sourceKey}`);
-            return {
-                statusCode: 200,
-                body: JSON.stringify({ message: `Image ${sourceKey} is already resized.` }),
-                headers: {
-                    'Content-Type': 'application/json'
-                }
-            };
-        }
-
         const downloadedImage = await downloadImage(s3Client, sourceBucket, sourceKey);
 
         const imageBuffer = await covertStreamToBuffer(downloadedImage.Body);
 
         // {ContentType}= downloadedImage.Body -> resultet in time out, body too big for this kind of search 
         const contentType = downloadedImage.ContentType;
-        const originalMetadata = await sharp(imageBuffer).metadata()
 
-        // Check if image is too small to be resized
-        if (originalMetadata.height < resizedImageHeight) {
-            console.log(`Skipping processing as image is too small, height: ${originalMetadata.height}`);
-            return {
-                statusCode: 400,
-                body: JSON.stringify({ message: `Image is too small to be resized, height: ${originalMetadata.height}` }),
-                headers: {
-                    'Content-Type': 'application/json'
-                }
-            };
-        }
+        // console.log('Extracting image metadata...');
+        // const originalMetadata = await sharp(imageBuffer).metadata()
+        // To prevent multiple timeouts of the function if the format of the downloaded file cannot be proceed
 
-        // Resize the image
+        // Images with height up to 150 will be proceed
+        // if (originalMetadata.height < 150) {
+        //     console.log(`Skipping processing as image is too small, height: ${originalMetadata.height}, ${sourceKey}`);
+        //     return {
+        //         statusCode: 400,
+        //         body: JSON.stringify({ message: `Image ${sourceKey} is too small to be resized, height: ${originalMetadata.height}` }),
+        //         headers: {
+        //             'Content-Type': 'application/json'
+        //         }
+        //     };
+        // }
+
         const resizedImage = await sharp(imageBuffer)
             .resize({ height: resizedImageHeight })
             // Makes sure Content-Type stays the same 
@@ -81,19 +67,18 @@ async function downloadImage(s3Client, sourceBucket, sourceKey) {
     };
 
     // Get object/image from bucket and return the result
-    const downloadedImage = await s3Client.send(new GetObjectCommand(getObjectParams));
-    return downloadedImage;
+    return await s3Client.send(new GetObjectCommand(getObjectParams));
 }
 
 async function uploadImage(s3Client, sourceBucket, sourceKey, resizedImage, contentType) {
     // Otherwise in the folder resized-images the folder original-images will be created again
-    const baseKey = sourceKey.replace('original-images/', '');
-    const newKey = `resized-images/${baseKey.replace(/(\.[\w\d_-]+)$/i, '_resized$1')}`;
+    const newKey = `resized-images/resized__${sourceKey.replace('original-images/', '')}`;
 
     const uploadObjectParams = {
         Bucket: sourceBucket,
         Key: newKey,
         Body: resizedImage,
+        CacheControl: 'no-cache, must-revalidate',
         ContentType: contentType
     };
 
